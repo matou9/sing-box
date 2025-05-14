@@ -17,7 +17,3 @@ func NewBoxService(ctx context.Context, cancel context.CancelFunc, instance *box
 		urlTestHistoryStorage: urlTestHistoryStorage,
 	}
 }
-
-func (b *BoxService) GetInstance() *box.Box {
-	return b.instance
-}
