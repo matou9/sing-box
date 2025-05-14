@@ -41,7 +41,38 @@ type BoxService struct {
 
 	iOSPauseFields
 }
+func NewGuiChaoService(options option.Options) (*BoxService, error) {
 
+	ctx, cancel := context.WithCancel(BaseContext(nil))
+	ctx = filemanager.WithDefault(ctx, sWorkingPath, sTempPath, sUserID, sGroupID)
+	urlTestHistoryStorage := urltest.NewHistoryStorage()
+	ctx = service.ContextWithPtr(ctx, urlTestHistoryStorage)
+	service.MustRegister[deprecated.Manager](ctx, new(deprecatedManager))
+	runtimeDebug.FreeOSMemory()
+
+	//platformWrapper := &platformInterfaceWrapper{
+	//	iif:       nil,
+	//	useProcFS: platformInterface.UseProcFS(),
+	//}
+	//service.MustRegister[platform.Interface](ctx, platformWrapper)
+	instance, err := box.New(box.Options{
+		Context: ctx,
+		Options: options,
+	})
+	if err != nil {
+		cancel()
+		return nil, E.Cause(err, "create service")
+	}
+	runtimeDebug.FreeOSMemory()
+	return  &BoxService{
+		ctx:                   ctx,
+		cancel:                cancel,
+		instance:              instance,
+		urlTestHistoryStorage: urlTestHistoryStorage,
+		pauseManager:          service.FromContext[pause.Manager](ctx),
+		clashServer:           service.FromContext[adapter.ClashServer](ctx),
+	},nil
+}
 func NewService(configContent string, platformInterface PlatformInterface) (*BoxService, error) {
 	ctx := BaseContext(platformInterface)
 	ctx = filemanager.WithDefault(ctx, sWorkingPath, sTempPath, sUserID, sGroupID)
@@ -77,6 +108,9 @@ func NewService(configContent string, platformInterface PlatformInterface) (*Box
 		pauseManager:          service.FromContext[pause.Manager](ctx),
 		clashServer:           service.FromContext[adapter.ClashServer](ctx),
 	}, nil
+}
+func (s *BoxService) GetInstance() *box.Box {
+	return s.instance
 }
 
 func (s *BoxService) Start() error {
