@@ -12,9 +12,11 @@ const (
 	CommandGroupExpand
 	CommandClashMode
 	CommandSetClashMode
-	CommandGetSystemProxyStatus
+	CommandGetSystemProxyStatus  
 	CommandSetSystemProxyEnabled
+	CommandGroupInfoOnly  //一定要排在这个位置，13，这样才能和客户端的startcommand的参数13一一对应
 	CommandConnections
 	CommandCloseConnection
 	CommandGetDeprecatedNotes
+
 )
