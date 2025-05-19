@@ -54,5 +54,6 @@ func (s *CommandServer) handleSelectOutbound(conn net.Conn) error {
 	if !selector.SelectOutbound(outboundTag) {
 		return writeError(conn, E.New("outbound not found in selector: ", outboundTag))
 	}
+	s.notifyURLTestUpdate() //不然更新了outbound，不刷新回调消息最新的选择的outbound
 	return writeError(conn, nil)
 }
