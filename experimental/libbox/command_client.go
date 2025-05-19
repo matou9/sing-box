@@ -104,6 +104,13 @@ func (c *CommandClient) Connect() error {
 		}
 		c.handler.Connected()
 		go c.handleGroupConn(conn)
+	case CommandGroupInfoOnly:
+		err = binary.Write(conn, binary.BigEndian, c.options.StatusInterval)
+		if err != nil {
+			return E.Cause(err, "write interval")
+		}
+		c.handler.Connected()
+		go c.handleSelectedGroupConn(conn)
 	case CommandClashMode:
 		var (
 			modeList    []string
