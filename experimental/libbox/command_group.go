@@ -6,7 +6,7 @@ import (
 	"io"
 	"net"
 	"time"
-
+	"github.com/sagernet/sing/common/rw"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/urltest"
 	"github.com/sagernet/sing-box/protocol/group"
@@ -14,7 +14,18 @@ import (
 	"github.com/sagernet/sing/common/varbin"
 	"github.com/sagernet/sing/service"
 )
+func (c *CommandClient) handleSelectedGroupConn(conn net.Conn) {
+	defer conn.Close()
 
+	for {
+		groups, err := readSelectedGroups(conn)
+		if err != nil {
+			c.handler.Disconnected(err.Error())
+			return
+		}
+		c.handler.WriteGroups(groups)
+	}
+}
 func (c *CommandClient) handleGroupConn(conn net.Conn) {
 	defer conn.Close()
 
@@ -67,7 +78,45 @@ func (s *CommandServer) handleGroupConn(conn net.Conn) error {
 		}
 	}
 }
-
+func (s *CommandServer) handleSelectedGroupConn(conn net.Conn) error {
+	var interval int64
+	err := binary.Read(conn, binary.BigEndian, &interval)
+	if err != nil {
+		return E.Cause(err, "read interval")
+	}
+	ticker := time.NewTicker(time.Duration(interval))
+	defer ticker.Stop()
+	ctx := connKeepAlive(conn)
+	writer := bufio.NewWriter(conn)
+	for {
+		service := s.service
+		if service != nil {
+			err = writeSelectedGroups(writer, service)
+			if err != nil {
+				return err
+			}
+		} else {
+			err = binary.Write(writer, binary.BigEndian, uint16(0))
+			if err != nil {
+				return err
+			}
+		}
+		err = writer.Flush()
+		if err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-s.urlTestUpdate:
+		}
+	}
+}
 type OutboundGroup struct {
 	Tag        string
 	Type       string
@@ -195,4 +244,174 @@ func (s *CommandServer) handleSetGroupExpand(conn net.Conn) error {
 		}
 	}
 	return writeError(conn, nil)
+}
+
+
+func readSelectedGroups(reader io.Reader) (OutboundGroupIterator, error) {
+	var groupLength uint16
+	err := binary.Read(reader, binary.BigEndian, &groupLength)
+	if err != nil {
+		return nil, err
+	}
+
+	groups := make([]*OutboundGroup, 0, groupLength)
+	for i := 0; i < int(groupLength); i++ {
+		var group OutboundGroup
+		group.Tag, err = rw.ReadVString(reader)
+		if err != nil {
+			return nil, err
+		}
+
+		group.Type, err = rw.ReadVString(reader)
+		if err != nil {
+			return nil, err
+		}
+
+		err = binary.Read(reader, binary.BigEndian, &group.Selectable)
+		if err != nil {
+			return nil, err
+		}
+
+		group.Selected, err = rw.ReadVString(reader)
+		if err != nil {
+			return nil, err
+		}
+
+		err = binary.Read(reader, binary.BigEndian, &group.IsExpand)
+		if err != nil {
+			return nil, err
+		}
+
+		var itemLength uint16
+		err = binary.Read(reader, binary.BigEndian, &itemLength)
+		if err != nil {
+			return nil, err
+		}
+
+		group.ItemList = make([]*OutboundGroupItem, itemLength)
+		for j := 0; j < int(itemLength); j++ {
+			var item OutboundGroupItem
+			item.Tag, err = rw.ReadVString(reader)
+			if err != nil {
+				return nil, err
+			}
+
+			item.Type, err = rw.ReadVString(reader)
+			if err != nil {
+				return nil, err
+			}
+
+			err = binary.Read(reader, binary.BigEndian, &item.URLTestTime)
+			if err != nil {
+				return nil, err
+			}
+
+			err = binary.Read(reader, binary.BigEndian, &item.URLTestDelay)
+			if err != nil {
+				return nil, err
+			}
+
+			group.ItemList[j] = &item
+		}
+		groups = append(groups, &group)
+	}
+	return newIterator(groups), nil
+}
+
+func writeSelectedGroups(writer io.Writer, boxService *BoxService) error {
+	var onlyGroupitems bool =true
+	historyStorage := service.PtrFromContext[urltest.HistoryStorage](boxService.ctx)
+	cacheFile := service.FromContext[adapter.CacheFile](boxService.ctx)
+	outbounds := boxService.instance.Outbound().Outbounds()
+	var iGroups []adapter.OutboundGroup
+	for _, it := range outbounds {
+		if group, isGroup := it.(adapter.OutboundGroup); isGroup {
+			iGroups = append(iGroups, group)
+		}
+	}
+	var groups []OutboundGroup
+	for _, iGroup := range iGroups {
+		var _group OutboundGroup
+		_group.Tag = iGroup.Tag()
+		_group.Type = iGroup.Type()
+		_, _group.Selectable = iGroup.(*group.Selector)
+		_group.Selected = iGroup.Now()
+		if cacheFile != nil {
+			if isExpand, loaded := cacheFile.LoadGroupExpand(_group.Tag); loaded {
+				_group.IsExpand = isExpand
+			}
+		}
+
+		for _, itemTag := range iGroup.All() {
+			itemOutbound, isLoaded := boxService.instance.Outbound().Outbound(itemTag)
+			if !isLoaded {
+				continue
+			}
+			if onlyGroupitems && itemTag != _group.Selected {
+				continue
+			}
+			var item OutboundGroupItem
+			item.Tag = itemTag
+			item.Type = itemOutbound.Type()
+			if history := historyStorage.LoadURLTestHistory(adapter.OutboundTag(itemOutbound)); history != nil {
+				item.URLTestTime = history.Time.Unix()
+				item.URLTestDelay = int32(history.Delay)
+			}
+			_group.ItemList = append(_group.ItemList, &item)
+		}
+		if len(_group.ItemList) < 2 && !onlyGroupitems {
+			continue
+		}
+		groups = append(groups, _group)
+	}
+
+	err := binary.Write(writer, binary.BigEndian, uint16(len(groups)))
+	if err != nil {
+		return err
+	}
+	for _, group := range groups {
+		err = varbin.Write(writer, binary.BigEndian, group.Tag)
+		if err != nil {
+			return err
+		}
+		err = varbin.Write(writer, binary.BigEndian, group.Type)
+		if err != nil {
+			return err
+		}
+		err = binary.Write(writer, binary.BigEndian, group.Selectable)
+		if err != nil {
+			return err
+		}
+		err = varbin.Write(writer, binary.BigEndian, group.Selected)
+		if err != nil {
+			return err
+		}
+		err = binary.Write(writer, binary.BigEndian, group.IsExpand)
+		if err != nil {
+			return err
+		}
+		err = binary.Write(writer, binary.BigEndian, uint16(len(group.ItemList)))
+		if err != nil {
+			return err
+		}
+		for _, item := range group.ItemList {
+			err = varbin.Write(writer, binary.BigEndian, item.Tag)
+			if err != nil {
+				return err
+			}
+			err = varbin.Write(writer, binary.BigEndian, item.Type)
+			if err != nil {
+				return err
+			}
+			err = binary.Write(writer, binary.BigEndian, item.URLTestTime)
+			if err != nil {
+				return err
+			}
+			err = binary.Write(writer, binary.BigEndian, item.URLTestDelay)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
