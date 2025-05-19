@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-
 	"github.com/sagernet/sing-box/common/urltest"
 	"github.com/sagernet/sing-box/experimental/clashapi"
 	"github.com/sagernet/sing-box/log"
@@ -156,6 +155,8 @@ func (s *CommandServer) handleConnection(conn net.Conn) error {
 		return s.handleCloseConnections(conn)
 	case CommandGroup:
 		return s.handleGroupConn(conn)
+	case CommandGroupInfoOnly:
+		return s.handleSelectedGroupConn(conn)
 	case CommandSelectOutbound:
 		return s.handleSelectOutbound(conn)
 	case CommandURLTest:
